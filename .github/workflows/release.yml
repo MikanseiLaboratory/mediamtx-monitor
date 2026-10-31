@@ -1,10 +1,26 @@
 name: release
 
-# タグ push（v*）か手動実行で、Windows のインストーラと Linux のパッケージを作ります。
+# タグ push（v*）または手動実行で、リリース／プレリリースを作成し、
+# Windows のインストーラと Linux の deb を添付します。
+#
+# ビルドとアップロードは Tauri 公式の `tauri-apps/tauri-action` が行います。
+# `tagName` に `__VERSION__` を書くと、アプリのバージョンに置き換えられます。
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 作成するタグ（例: v0.1.0-alpha.1）
+        required: true
+      prerelease:
+        description: プレリリースとして公開する
+        type: boolean
+        default: true
+      draft:
+        description: ドラフトとして作成する
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,18 +29,68 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+  # ---------------------------------------------------------------
+  # リリース作成 + ビルド + アップロード（Windows）
+  # ---------------------------------------------------------------
+  release-windows:
+    name: release (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+
+      - name: フロントエンドの依存インストール
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Tauri アプリのビルドとリリース
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # action から見たリポジトリ直下。tauri.conf.json はこの下にある。
+          projectPath: crates/mediamtx-monitor
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          releaseName: "MediaMTX Monitor ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          releaseBody: |
+            MediaMTX の死活監視と SRT 品質（パケットドロップ・回復率）を可視化するデスクトップアプリです。
+
+            ## インストール（Windows）
+            下の `MediaMTX Monitor_*_x64-setup.exe` を実行してください。
+
+            ## 使い方
+            1. MediaMTX 側で `api: true` と `metrics: true` を有効にします。
+            2. アプリを起動し、設定タブで接続先（既定 `http://127.0.0.1:9997`）を確認します。
+            3. SRT 品質タブで、接続ごとのドロップ率・回復率・RTT を確認できます。
+          releaseDraft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || contains(github.ref_name, '-') }}
+          args: ${{ runner.os == 'Windows' && '--target x86_64-pc-windows-msvc' || '' }}
+
+  # ---------------------------------------------------------------
+  # Linux の deb（同じリリースへ追加アップロード）
+  # ---------------------------------------------------------------
+  release-linux:
+    name: release (linux deb)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
       - name: Linux のビルド依存
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -45,29 +111,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.os }}
+          key: release-linux
 
-      - name: フロントエンドのビルド
+      - name: フロントエンドの依存インストール
         working-directory: web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
+        run: pnpm install --frozen-lockfile
 
-      - name: Tauri CLI の準備
-        run: cargo install tauri-cli --version "^2.11" --locked
-
-      - name: アプリのビルド（インストーラ付き）
-        working-directory: crates/mediamtx-monitor
-        run: cargo tauri build --ci ${{ runner.os == 'Linux' && '--bundles deb' || '' }}
-
-      - name: 成果物をリリースへ添付
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          draft: true
-          files: |
-            target/release/bundle/nsis/*
-            target/release/bundle/msi/*
-            target/release/bundle/deb/*
+      - name: Tauri アプリのビルド（deb）
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/mediamtx-monitor
+          # Windows ジョブが作成したリリースへ追加する。未作成なら作成する。
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          releaseName: "MediaMTX Monitor ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          releaseDraft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || contains(github.ref_name, '-') }}
+          args: --bundles deb
