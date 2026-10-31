@@ -26,5 +26,10 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     css: false,
+    // テストでは React の development 版を解決させる。
+    // React 19 は `exports` の条件ではなく `NODE_ENV` で開発版／本番版を
+    // 切り替えるため、`NODE_ENV=test` のままだと production 版が読まれ、
+    // `React.act` が無いせいで `@testing-library/react` の `renderHook` が失敗する。
+    env: { NODE_ENV: "development" },
   },
 });

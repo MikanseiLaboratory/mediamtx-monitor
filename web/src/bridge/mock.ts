@@ -41,6 +41,7 @@ const DEFAULT_CONFIG: AppConfig = {
     recoveryRateWarn: 90,
     rttMsWarn: 200,
     cooldownSecs: 300,
+    holdSecs: 3,
   },
   notify: {
     enabled: true,
@@ -82,6 +83,14 @@ interface MockConn {
 
 export function createMockBridge(): Bridge {
   let config: AppConfig = structuredClone(DEFAULT_CONFIG);
+  // `?holdSecs=N` で警告の保持秒数を差し替えられる（E2E で挙動を確かめるため）。
+  if (typeof window !== "undefined") {
+    const param = new URLSearchParams(window.location.search).get("holdSecs");
+    if (param !== null && param !== "") {
+      const n = Number(param);
+      if (Number.isFinite(n)) config.srt.holdSecs = Math.max(0, Math.min(60, n));
+    }
+  }
   let running = true;
   let seq = 0;
   const listeners = new Map<string, Set<(payload: unknown) => void>>();
@@ -112,6 +121,9 @@ export function createMockBridge(): Bridge {
 
   const baseRecvMbps = [12.4, 8.1];
 
+  /// 接続ごとの「劣化が始まった時刻」と「記録済みか」（保持時間の判定用）。
+  const mockQuality = new Map<string, { since: number; announced: boolean }>();
+
   const nowStatus = (): MonitorStatus => ({
     running,
     intervalMs: config.pollIntervalMs,
@@ -132,7 +144,13 @@ export function createMockBridge(): Bridge {
     const at = atMs ?? Date.now();
     const srt: SrtConnPatch[] = conns.map((c, i) => {
       const jitter = (rand() - 0.5) * 0.004;
-      const dropRate = Math.max(0, Math.min(5, 0.35 + jitter + (i === 0 ? Math.sin(at / 20000) * 0.4 : -0.3)));
+      // 約 45 秒周期で「数秒だけ劣化する」区間を作る。保持時間の挙動を
+      // 画面で確認できるよう、短い劣化が確実に起きるようにしている。
+      const burst = i === 0 && Math.sin(at / 7000) > 0.7 ? 1.2 : 0;
+      const dropRate = Math.max(
+        0,
+        Math.min(5, 0.35 + jitter + (i === 0 ? Math.sin(at / 20000) * 0.4 : -0.3) + burst),
+      );
       const recoveryRate = Math.max(80, Math.min(100, 95 + Math.sin(at / 15000 + i) * 4));
       const recvMbps = baseRecvMbps[i] + Math.sin(at / 7000 + i) * 0.6;
       return {
@@ -221,6 +239,58 @@ export function createMockBridge(): Bridge {
       },
     }));
 
+    // 劣化イベントも流す（画面のタイムラインを確認できるように）。
+    // 状態機械と同じ「保持時間」の考え方で、一定時間続いた劣化だけを記録する。
+    //
+    // ただし起動時の履歴の埋め戻し（過去へ遡って `tick` する）では判定しない。
+    // ここで判定すると「1 時間前から劣化が続いていた」ことになり、いきなり
+    // 大量のイベントが流れ込んでしまう。ライブの更新だけで判定する。
+    const events: StatusEvent[] = [];
+    const nowMs = at;
+    const backfilling = atMs !== undefined && atMs < Date.now() - 5000;
+    if (!backfilling) {
+      for (const s of srt) {
+        const c = s.sample;
+        const degraded = c.severity !== "ok";
+        const prev = mockQuality.get(c.id);
+        if (!degraded) {
+          // 劣化を記録した後に戻ったときだけ「回復」を記録する。
+          // 保持時間に満たない一瞬の劣化は、劣化も回復も記録しない（ノイズ防止）。
+          if (prev?.announced) {
+            mockQuality.set(c.id, { since: 0, announced: false });
+            events.push({
+              seq,
+              at: new Date(nowMs).toISOString(),
+              kind: "srt_recovered",
+              target: c.id,
+              label: c.path,
+              message: `SRT 品質が回復しました（path=\`${c.path}\`）。`,
+              severity: "info",
+            });
+          } else if (prev) {
+            mockQuality.delete(c.id);
+          }
+          continue;
+        }
+        const holdMs = Math.max(0, config.srt.holdSecs) * 1000;
+        const since = prev && prev.since > 0 ? prev.since : nowMs;
+        if (prev?.announced !== true && nowMs - since >= holdMs) {
+          mockQuality.set(c.id, { since, announced: true });
+          events.push({
+            seq,
+            at: new Date(since).toISOString(), // 発生時刻に遡って記録する
+            kind: "srt_degraded",
+            target: c.id,
+            label: c.path,
+            message: `SRT 品質が${c.severity === "critical" ? "劣化" : "注意"}（path=\`${c.path}\`）: ドロップ率 ${(c.derived.dropRate ?? 0).toFixed(2)}% / 回復率 ${(c.derived.recoveryRate ?? 100).toFixed(1)}%`,
+            severity: c.severity === "critical" ? "critical" : "warning",
+          });
+        } else if (!prev) {
+          mockQuality.set(c.id, { since, announced: false });
+        }
+      }
+    }
+
     const update: MonitorUpdate = {
       seq,
       at: new Date(at).toISOString(),
@@ -242,7 +312,7 @@ export function createMockBridge(): Bridge {
       srt,
       removedPaths: [],
       removedSrt: [],
-      events: [],
+      events,
       serverVersion: "v1.21.2 (mock)",
       full: seq === 1,
     };

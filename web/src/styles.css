@@ -861,6 +861,16 @@ code,
   grid-column: 1 / -1;
 }
 
+/* 項目の補足説明（スライダーの意味など）。 */
+.field-hint {
+  display: block;
+  font-style: normal;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 2px;
+}
+
 .field input[type="text"],
 .field input[type="password"],
 .field input[type="number"],

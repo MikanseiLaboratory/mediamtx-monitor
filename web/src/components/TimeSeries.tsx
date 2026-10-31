@@ -218,7 +218,9 @@ export function TimeSeries({
     zoomedRef.current = false;
   }, [windowMs, metric.key]);
 
-  const hasData = points.some(([, v]) => v !== null);
+  // 「グラフに描ける点があるか」で判定する。窓の外の古い点だけがある場合や、
+  // 窓内がすべて欠測（null）の場合は、何も描かれていないので空表示にする。
+  const hasData = toColumnarData(points, windowMs)[1].some((v) => v !== null);
 
   return (
     <div className="timeseries" data-testid={`timeseries-${metric.key}`}>

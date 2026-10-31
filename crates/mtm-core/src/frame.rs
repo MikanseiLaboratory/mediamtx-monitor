@@ -125,12 +125,14 @@ impl FrameBuilder {
         self.api = other.api.clone();
         self.server_version = other.server_version.clone();
         self.prev_tick = other.prev_tick;
-        // サーバー系列は固定本数なので、値だけ最新に合わせる。
-        for metric in other.server_series.metrics() {
-            if let Some(last) = other.server_series.get(metric).and_then(|r| r.last()) {
-                self.server_series.push(metric, last.at_ms, last.value);
-            }
-        }
+        // サーバー系列も履歴ごと引き継ぐ。
+        //
+        // 以前は最新 1 点だけを push していたため、起動直後に空のバッファへ
+        // 同期した場合、読み取り用バッファには 1 点しか無かった。その状態では
+        // グラフの x 範囲が 1 点に潰れ、右端に縦線が出るだけになる
+        // （時間窓を広げても過去が出ない）。クローンは参照カウント式の
+        // `VecDeque` の複製で、点数ぶんの配列を作るより軽い。
+        self.server_series = other.server_series.clone();
     }
     /// 内容を `slot` へコピーする（コマンド側の読み取り用バッファへ写す）。
     pub fn clone_into(&self, slot: &mut Option<FrameBuilder>) {
@@ -579,6 +581,7 @@ pub fn should_notify(severity: EventSeverity) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ring::Ring;
     use chrono::TimeZone;
 
     fn at(secs: i64) -> chrono::DateTime<chrono::FixedOffset> {
@@ -826,5 +829,49 @@ mod tests {
     fn bytes_per_interval_handles_reset() {
         assert_eq!(bytes_per_interval(10, 100, 1000), 0.0);
         assert!((bytes_per_interval(125_000, 0, 1000) - 1.0).abs() < 1e-9);
+    }
+
+    /// 起動直後の読み取り用バッファが、監視側の履歴を取りこぼさないこと。
+    ///
+    /// 実機の流れは「起動時に空のバッファを置き、以降は毎周期 `merge_from` で
+    /// 差分を写す」。`merge_from` がサーバー系列を**最新 1 点だけ** push する実装だと、
+    /// 起動直後は 1 点しか無く、5 分窓のグラフが右端の点にしかならない
+    /// （ドロップ率が「まだ記録されていません」に見える一因）。
+    #[test]
+    fn merge_from_catches_up_from_empty_buffer() {
+        let cfg = AppConfig::default();
+        let mut monitoring = FrameBuilder::new(&cfg);
+        // アプリ起動より前から監視が走っていた状態（履歴がある）
+        for i in 0..20 {
+            monitoring.ingest(
+                at(i),
+                health_ok(),
+                None,
+                Some(vec![obs_path("a", true, 0)]),
+                Some(vec![]),
+                i == 0,
+            );
+        }
+
+        // 起動時に置かれる空のバッファ
+        let mut reading = FrameBuilder::new(&cfg);
+        // 起動後の 1 周期目で同期する
+        reading.merge_from(&monitoring);
+
+        let mon_len = monitoring
+            .server_series()
+            .get(metric_key::API_RTT_MS)
+            .map(Ring::len)
+            .unwrap_or(0);
+        let read_len = reading
+            .server_series()
+            .get(metric_key::API_RTT_MS)
+            .map(Ring::len)
+            .unwrap_or(0);
+        assert_eq!(mon_len, 20);
+        assert_eq!(
+            read_len, mon_len,
+            "起動直後の同期で履歴を取りこぼしている（read={read_len}, monitor={mon_len}）"
+        );
     }
 }
