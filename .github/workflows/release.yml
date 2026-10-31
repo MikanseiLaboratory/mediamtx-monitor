@@ -79,7 +79,8 @@ jobs:
             3. SRT 品質タブで、接続ごとのドロップ率・回復率・RTT を確認できます。
           releaseDraft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || contains(github.ref_name, '-') }}
-          args: ${{ runner.os == 'Windows' && '--target x86_64-pc-windows-msvc' || '' }}
+          # WiX(msi) はプレリリース識別子を扱えないため、NSIS のセットアップ exe のみ作る。
+          args: --bundles nsis
 
   # ---------------------------------------------------------------
   # Linux の deb（同じリリースへ追加アップロード）
