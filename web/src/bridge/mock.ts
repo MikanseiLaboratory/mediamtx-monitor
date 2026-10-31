@@ -125,9 +125,11 @@ export function createMockBridge(): Bridge {
     totalSamples: history.length,
   });
 
-  const tick = (): MonitorUpdate => {
+  /// 1 周期分の更新を作る。`atMs` を渡すと、その時刻の観測として記録する
+  /// （起動直後に過去の履歴を埋めて、グラフが 1 点の縦線にならないようにする）。
+  const tick = (atMs?: number): MonitorUpdate => {
     seq += 1;
-    const at = Date.now();
+    const at = atMs ?? Date.now();
     const srt: SrtConnPatch[] = conns.map((c, i) => {
       const jitter = (rand() - 0.5) * 0.004;
       const dropRate = Math.max(0, Math.min(5, 0.35 + jitter + (i === 0 ? Math.sin(at / 20000) * 0.4 : -0.3)));
@@ -227,9 +229,10 @@ export function createMockBridge(): Bridge {
         pathCount: 3,
         pathsOnline: 2,
         pathsDown: 1,
-        readerCount: 3,
-        inboundMbps: 20.5,
-        outboundMbps: 41,
+        // 視聴者・ビットレートは実際に揺れる（グラフが直線にならないように）。
+        readerCount: 3 + Math.round(Math.sin(at / 21000) * 1.4 + 1.4),
+        inboundMbps: srt.reduce((sum, s) => sum + s.sample.derived.recvMbps, 0),
+        outboundMbps: srt.reduce((sum, s) => sum + s.sample.derived.recvMbps * 2, 0),
         srtConnCount: 2,
         srtMaxDropRate: srt[0].sample.derived.dropRate,
         srtMinRecoveryRate: Math.min(...srt.map((s) => s.sample.derived.recoveryRate ?? 100)),
@@ -268,6 +271,33 @@ export function createMockBridge(): Bridge {
     (timer as unknown as { unref: () => void }).unref();
   }
 
+  /// サーバー系メトリクスの値。`frame.rs` がリングへ積むキーと同じ名前で返す。
+  /// かつては全メトリクスに `srtMaxDropRate` を返しており、
+  /// ダッシュボードの 4 グラフがすべて同じ線になっていた。
+  const serverMetricValue = (u: MonitorUpdate, metric: string): number | null => {
+    const t = u.totals;
+    switch (metric) {
+      case "api_rtt_ms":
+        return u.api.rttMs;
+      case "paths_online":
+        return t.pathsOnline;
+      case "paths_total":
+        return t.pathCount;
+      case "readers":
+        return t.readerCount;
+      case "inbound_mbps":
+        return t.inboundMbps;
+      case "outbound_mbps":
+        return t.outboundMbps;
+      case "srt_conns":
+        return t.srtConnCount;
+      case "srt_drop_rate":
+        return t.srtMaxDropRate;
+      default:
+        return null;
+    }
+  };
+
   const seriesFor = (request: SeriesRequest): SeriesResponse => {
     const from = request.fromMs ?? Date.now() - 3600_000;
     const to = request.toMs ?? Date.now();
@@ -279,7 +309,8 @@ export function createMockBridge(): Bridge {
       const points: Array<[number, number | null]> = rows.map((h) => {
         const s = srtPatch(h.update);
         let value: number | null = null;
-        if (s) {
+        if (isSrt) {
+          if (!s) return [h.at, null];
           const d = s.sample.derived;
           value =
             metric === "srt_drop_rate"
@@ -290,9 +321,19 @@ export function createMockBridge(): Bridge {
                   ? d.recvMbps
                   : metric === "srt_rtt_ms"
                     ? d.rttMs
-                    : null;
+                    : metric === "srt_link_capacity"
+                      ? d.linkCapacityMbps
+                      : metric === "srt_nak_rate"
+                        ? d.nakRate
+                        : metric === "srt_unrecovered_packets"
+                          ? d.lossPackets != null && d.recoveredPackets != null
+                            ? Math.max(0, d.lossPackets - d.recoveredPackets)
+                            : null
+                          : metric === "srt_send_mbps"
+                            ? s.sample.counters.mbpsSendRate
+                            : null;
         } else {
-          value = h.update.totals.srtMaxDropRate;
+          value = serverMetricValue(h.update, metric);
         }
         return [h.at, value];
       });
@@ -301,13 +342,20 @@ export function createMockBridge(): Bridge {
     return { scope: request.scope, fromMs: from, toMs: to, series };
   };
 
-  // 起動直後に 1 回分を流してグラフをすぐ描画できる状態にする。
+  // 起動直後に、過去 1 時間ぶんの履歴を 1 秒間隔で埋めておく。
+  // ここで `tick()` を連続で呼ぶと全点が同じミリ秒に積まれ、グラフが
+  // 右端の 1 点の縦線にしかならず、線の形も確認できなくなる。
+  // 時刻を遡って与えることで、どの時間窓でも形が見えるようにする。
   queueMicrotask(() => {
-    for (let i = 0; i < 60; i += 1) {
-      seq += 1;
-      tick();
+    const now = Date.now();
+    const stepMs = config.pollIntervalMs || 1000;
+    const backfill = Math.floor(3600_000 / stepMs);
+    for (let i = backfill; i > 0; i -= 1) {
+      tick(now - i * stepMs);
     }
-    history.splice(0, history.length - 300);
+    // 最新は「今」として 1 点入れておく。
+    tick(now);
+    history.splice(0, Math.max(0, history.length - 3700));
   });
 
   return {

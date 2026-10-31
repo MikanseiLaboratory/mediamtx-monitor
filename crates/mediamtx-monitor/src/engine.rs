@@ -196,14 +196,7 @@ impl Engine {
     ) -> Option<Vec<SeriesPoints>> {
         let result = self.with_builder(|b| {
             // スコープは `server` / `path:<名前>` / `srt:<ID>`。
-            // フロントは「1 グラフ 1 スコープ」のため `<scope>:<metric>` で問い合わせる
-            // ことがあるので、その場合も元のスコープとして扱う。
-            let base_scope = scope
-                .strip_suffix(&format!(
-                    ":{}",
-                    metrics.first().map(String::as_str).unwrap_or("")
-                ))
-                .unwrap_or(scope);
+            let base_scope = normalize_scope(scope, metrics);
             let set = if base_scope == "server" {
                 Some(b.server_series())
             } else if let Some(name) = base_scope.strip_prefix("path:") {
@@ -255,6 +248,30 @@ impl Engine {
 
 fn sample_count(builder: &FrameBuilder) -> usize {
     builder.server_series().sample_count()
+}
+
+/// フロントが送るスコープ表記を正規化する。
+///
+/// 旧フロントは「1 グラフ 1 スコープ」だったため `server:api_rtt_ms` のように
+/// スコープの後ろへメトリクス名を付けていた。この表記も受ける。
+///
+/// **注意**: `:` の後ろを無条件に削ってはいけない。`srt:cam1` のような接続 ID は
+/// 後ろにメトリクス名と紛らわしい文字列を持つことがある（ID の末尾が `1` で
+/// メトリクスが `1` など）。素朴な `strip_suffix` だと `srt:cam1` が `srt:cam` に
+/// 化けて別の接続を指すので、**削った結果が既知のベーススコープになる場合だけ**採用する。
+fn normalize_scope<'a>(scope: &'a str, metrics: &[String]) -> &'a str {
+    for metric in metrics {
+        if let Some(base) = scope.strip_suffix(&format!(":{metric}")) {
+            if is_base_scope(base) {
+                return base;
+            }
+        }
+    }
+    scope
+}
+
+fn is_base_scope(scope: &str) -> bool {
+    scope == "server" || scope.starts_with("path:") || scope.starts_with("srt:")
 }
 
 fn run_loop(
@@ -364,5 +381,47 @@ mod tests {
         let engine = Engine::new(AppConfig::default(), sink);
         assert!(engine.snapshot().is_none());
         assert_eq!(engine.totals_summary(), (0, 0, 0));
+    }
+
+    #[test]
+    fn normalize_scope_accepts_legacy_metric_suffix() {
+        let v = |s: &str| vec![s.to_string()];
+        // 旧フロントの「スコープ:メトリクス」表記
+        assert_eq!(
+            normalize_scope("server:api_rtt_ms", &v("api_rtt_ms")),
+            "server"
+        );
+        assert_eq!(
+            normalize_scope("srt:abc:srt_rtt_ms", &v("srt_rtt_ms")),
+            "srt:abc"
+        );
+        assert_eq!(
+            normalize_scope("path:cam1:readers", &v("readers")),
+            "path:cam1"
+        );
+    }
+
+    #[test]
+    fn normalize_scope_never_corrupts_connection_ids() {
+        // 接続 ID の末尾がメトリクス名と紛らわしい場合でも、別の ID に化けない。
+        // （旧実装は `srt:cam1` + メトリクス `1` で `srt:cam` を返していた）
+        let v = |s: &str| vec![s.to_string()];
+        assert_eq!(normalize_scope("srt:cam1", &v("1")), "srt:cam1");
+        assert_eq!(normalize_scope("srt:cam1", &v("cam")), "srt:cam1");
+        // そのままのスコープ
+        assert_eq!(normalize_scope("server", &v("api_rtt_ms")), "server");
+        assert_eq!(normalize_scope("srt:xyz", &v("srt_drop_rate")), "srt:xyz");
+    }
+
+    #[test]
+    fn normalize_scope_keeps_base_when_suffix_is_not_metric() {
+        // `path:` の後ろにメトリクス名と同じパス名があっても壊さない。
+        let v = |s: &str| vec![s.to_string()];
+        assert_eq!(normalize_scope("srt:a:readers", &v("readers")), "srt:a");
+        // 削った結果が既知のベースでなければ元のまま。
+        assert_eq!(
+            normalize_scope("weird:readers", &v("readers")),
+            "weird:readers"
+        );
     }
 }

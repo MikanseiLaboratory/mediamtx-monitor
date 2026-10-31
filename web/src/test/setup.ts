@@ -10,6 +10,21 @@ if (!("ResizeObserver" in globalThis)) {
     ResizeObserverStub;
 }
 
+// uPlot は読み込み時に devicePixelRatio を matchMedia から判定する。
+// jsdom には matchMedia が無いので、常に 1x として返す。
+if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}
+
 // HTMLCanvasElement#getContext / toDataURL は jsdom では未実装。
 if (typeof HTMLCanvasElement !== "undefined") {
   HTMLCanvasElement.prototype.getContext = (() =>

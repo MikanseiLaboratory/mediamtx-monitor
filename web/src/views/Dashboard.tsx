@@ -29,11 +29,10 @@ export function Dashboard() {
     [paths],
   );
 
-  // サーバー系列は表示時と窓の変更時に取り直す（追記は下の効果で行う）。
+  // サーバー系列は表示時と窓の変更時にまとめて 1 回だけ取り直す。
+  // グラフは同じ `server` スコープを読むので、メトリクスごとに分けない。
   useEffect(() => {
-    for (const key of SERVER_CHARTS) {
-      void loadSeries(`server:${key}`, [key], true);
-    }
+    void loadSeries("server", [...SERVER_CHARTS], true);
   }, [loadSeries, windowMs]);
 
   // 最新値の追記（再取得せずに伸ばす）。
@@ -48,9 +47,7 @@ export function Dashboard() {
       inbound_mbps: t.totals.inboundMbps,
       srt_drop_rate: t.totals.srtMaxDropRate,
     };
-    for (const key of SERVER_CHARTS) {
-      appendPoints(`server:${key}`, at, values);
-    }
+    appendPoints("server", at, values);
   }, [seq, appendPoints]);
 
   const running = status?.running ?? false;
