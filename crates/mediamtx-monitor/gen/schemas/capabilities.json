@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"MediaMTX Monitor の既定権限（ローカル IPC と通知のみ）","local":true,"windows":["main"],"permissions":["core:default","notification:default","opener:allow-open-url"]}}

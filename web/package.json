@@ -1,0 +1,39 @@
+{
+  "name": "mediamtx-monitor-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MediaMTX Monitor のフロントエンド（React + TypeScript + uPlot）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.0",
+    "@tauri-apps/plugin-notification": "2.8.0",
+    "@tauri-apps/plugin-opener": "2.7.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "uplot": "1.6.32",
+    "zustand": "5.0.16"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "jsdom": "^26.0.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

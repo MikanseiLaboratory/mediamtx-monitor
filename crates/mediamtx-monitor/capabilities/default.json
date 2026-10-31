@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "MediaMTX Monitor の既定権限（ローカル IPC と通知のみ）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "opener:allow-open-url"
+  ]
+}

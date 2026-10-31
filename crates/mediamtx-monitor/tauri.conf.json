@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.11.4",
+  "productName": "MediaMTX Monitor",
+  "version": "0.1.0",
+  "identifier": "io.github.mikanseilaboratory.mediamtx-monitor",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../web dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm --dir ../web build",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "MediaMTX Monitor",
+        "width": 1400,
+        "height": 900,
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0 MediaMTX Monitor/0.1.0",
+        "minWidth": 960,
+        "minHeight": 600,
+        "resizable": true,
+        "create": false,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "msi",
+      "deb",
+      "appimage"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "createUpdaterArtifacts": false
+  }
+}

@@ -1,0 +1,30 @@
+# ビルド成果物
+/target/
+/web/dist/
+/web/node_modules/
+/web/test-results/
+/web/playwright-report/
+/web/blob-report/
+/web/.vite/
+
+# 開発用のローカル環境（MediaMTX の一時設定・ログ）
+/.dev/
+
+# エディタ / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ローカル環境変数
+.env
+.env.local
+# MediaMTX の自動生成物（開発時の一時ファイル）
+auto.crt
+auto.key
+server.crt
+server.key
+recordings/
+*.log
+crates/mikansei-app/gen/

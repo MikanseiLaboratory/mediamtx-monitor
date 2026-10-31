@@ -1,0 +1,41 @@
+[package]
+name = "mediamtx-monitor"
+description = "MediaMTX Monitor: MediaMTX liveness and SRT quality monitor (Tauri v2 desktop app)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "mediamtx_monitor"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mediamtx-monitor"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+mtm-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+log.workspace = true
+# HTTP は OS 標準の TLS（Windows では Schannel）を使う。rustls の ring は環境に
+# よって C コンパイラでのビルドに失敗するため、依存の少ない native-tls を選ぶ。
+ureq = { version = "3.4", default-features = false, features = ["native-tls"] }
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+
+[features]
+# Tauri 既定のカスタムプロトコル（埋め込みアセット）を有効にする。
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+tempfile = "3"

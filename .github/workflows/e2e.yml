@@ -1,0 +1,174 @@
+name: e2e
+
+# 実機（GitHub ホステッドの Ubuntu ランナー）で本物の MediaMTX と ffmpeg を
+# 動かし、SRT のパケットドロップ／回復率がアプリのコアで正しく算出されること、
+# パス操作・期間指定エクスポートが往復することを検証する。
+on:
+  workflow_dispatch:
+    inputs:
+      mediamtx_version:
+        description: 使用する MediaMTX のバージョン
+        required: false
+        default: v1.21.3
+      stream_seconds:
+        description: SRT を流す秒数
+        required: false
+        default: "60"
+  schedule:
+    # 毎日 18:00 JST（09:00 UTC）
+    - cron: "0 9 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MTM_LIVE: "1"
+  MTM_LIVE_URL: http://127.0.0.1:9997
+  MEDIAMTX_VERSION: ${{ github.event.inputs.mediamtx_version || 'v1.21.3' }}
+  STREAM_SECONDS: ${{ github.event.inputs.stream_seconds || '60' }}
+
+jobs:
+  live:
+    name: MediaMTX + SRT live (ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 実メディアツールの導入（ffmpeg）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg curl jq unzip libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config build-essential
+
+      - name: MediaMTX バイナリの取得
+        run: |
+          set -euo pipefail
+          mkdir -p .dev/mediamtx
+          curl -fsSL -o /tmp/mediamtx.zip \
+            "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/mediamtx.zip -C .dev/mediamtx
+          .dev/mediamtx/mediamtx --version
+
+      - name: テスト用 mediamtx.yml（API とメトリクスを有効化）
+        run: |
+          cat > .dev/mediamtx.yml <<'YAML'
+          logLevel: info
+          logDestinations: [stdout]
+          authMethod: internal
+          authInternalUsers:
+            - user: any
+              pass:
+              ips: []
+              permissions:
+                - action: publish
+                - action: read
+                - action: api
+                - action: metrics
+          api: true
+          apiAddress: 127.0.0.1:9997
+          # メトリクスは API とは別ポートの別サーバーとして提供される。
+          metrics: true
+          metricsAddress: 127.0.0.1:9998
+          rtsp: false
+          rtmp: false
+          hls: false
+          webrtc: false
+          srt: true
+          srtAddress: 127.0.0.1:8890
+          paths:
+            e2e:
+              source: publisher
+          YAML
+          cat .dev/mediamtx.yml
+
+      - name: MediaMTX を起動
+        run: |
+          set -euo pipefail
+          .dev/mediamtx/mediamtx .dev/mediamtx.yml > .dev/mediamtx.log 2>&1 &
+          echo $! > .dev/mediamtx.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9997/v3/info; then echo; echo "API 起動確認 OK"; exit 0; fi
+            sleep 1
+          done
+          echo "MediaMTX が起動しませんでした"; cat .dev/mediamtx.log; exit 1
+
+      - name: メトリクスの公開状況を確認
+        run: |
+          set -u
+          echo "--- metrics (9998) /metrics"
+          curl -fsS http://127.0.0.1:9998/metrics | head -n 5
+          echo "--- API (9997) は /metrics を提供しない（404 が正しい）"
+          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9997/metrics || true
+
+      - name: SRT で配信（ffmpeg）+ 視聴（1 本）
+        run: |
+          set -euo pipefail
+          ffmpeg -hide_banner -loglevel error -re -f lavfi \
+            -i testsrc2=size=640x360:rate=30 \
+            -c:v libx264 -preset ultrafast -tune zerolatency \
+            -b:v 3000k -maxrate 3000k -bufsize 3000k -g 30 \
+            -f mpegts "srt://127.0.0.1:8890?streamid=publish:e2e&mode=caller&latency=1000000" \
+            > .dev/publisher.log 2>&1 &
+          echo $! > .dev/publisher.pid
+          sleep 5
+          ffmpeg -hide_banner -loglevel error \
+            -i "srt://127.0.0.1:8890?streamid=read:e2e&mode=caller&latency=1000000" \
+            -c copy -f mpegts /dev/null > .dev/reader.log 2>&1 &
+          echo $! > .dev/reader.pid
+          sleep 3
+          echo "--- SRT 接続"
+          curl -fsS http://127.0.0.1:9997/v3/srt/conns/list | jq '{itemCount, items: [.items[] | {id, state, path, remoteAddr}]}'
+
+      - name: Rust ツールチェーン
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+
+      - name: 実機結合テスト（MediaMTX + SRT）
+        run: |
+          mkdir -p web/dist
+          if [ ! -f web/dist/index.html ]; then
+            echo '<!doctype html><title>placeholder</title>' > web/dist/index.html
+          fi
+          cargo test -p mediamtx-monitor --test live_mediamtx -- --nocapture --test-threads=1
+
+      - name: ストリームを流したまま再テスト（ドロップ/回復率が非 null になること）
+        run: |
+          sleep "$STREAM_SECONDS"
+          cargo test -p mediamtx-monitor --test live_mediamtx live_srt_quality_is_computed -- --nocapture --test-threads=1
+
+      - name: 書き出しファイルを取得
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-exports
+          path: target/live-export/**/live.*
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: ログを保存
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mediamtx-logs
+          path: .dev/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 後片付け
+        if: always()
+        run: |
+          for f in .dev/publisher.pid .dev/reader.pid .dev/mediamtx.pid; do
+            if [ -f "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
+          done
+          pkill -f mediamtx || true
+          pkill -f ffmpeg || true
