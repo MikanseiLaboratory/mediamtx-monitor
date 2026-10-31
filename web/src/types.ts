@@ -212,6 +212,8 @@ export interface SrtThresholds {
   recoveryRateWarn: number;
   rttMsWarn: number;
   cooldownSecs: number;
+  /** 劣化／回復を確定するまでの保持時間（秒）。瞬時の変化をノイズにしない。 */
+  holdSecs: number;
 }
 
 export interface NotifyRules {

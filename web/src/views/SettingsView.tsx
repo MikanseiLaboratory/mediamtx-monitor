@@ -312,6 +312,24 @@ export function SettingsView() {
               onChange={(e) => updateSrt({ rttMsWarn: Number(e.target.value) })}
             />
           </label>
+          <label className="field field-wide">
+            <span>
+              警告の保持: {draft.srt.holdSecs} 秒
+              <em className="field-hint">
+                この秒数だけ状態が続いてから劣化／回復を記録します。一瞬の変化は
+                ノイズにせず、記録するときは発生時刻に遡ります（0 で即時）。
+              </em>
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={30}
+              step={1}
+              value={draft.srt.holdSecs}
+              onChange={(e) => updateSrt({ holdSecs: Number(e.target.value) })}
+              data-testid="srt-hold-secs"
+            />
+          </label>
         </div>
       </div>
 

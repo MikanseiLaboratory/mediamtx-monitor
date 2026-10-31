@@ -71,6 +71,34 @@ describe("モックの系列", () => {
     }
   });
 
+  it("read 接続でもレートが 0 にならない（送信側の値を返す）", async () => {
+    // cam1 は read（MediaMTX が視聴者へ送信する側）。
+    // 実機では `mbpsReceiveRate` が制御パケット分しか出ないため、
+    // 送信レートを見ないと受信レートが常に 0 になる。
+    const bridge = createMockBridge();
+    await new Promise((r) => setTimeout(r, 30));
+    const resp = await fetchSeries(bridge, "srt:mock-srt-cam1", ["srt_recv_mbps"]);
+    const pts = resp.series[0][1];
+    const last = pts.at(-1)![1];
+    expect(last).not.toBeNull();
+    expect(last!).toBeGreaterThan(1);
+  });
+
+  it("read 接続のカウンタは送信側に入る", async () => {
+    const bridge = createMockBridge();
+    await new Promise((r) => setTimeout(r, 30));
+    const snap = await bridge.invoke<{
+      srt: Array<{ sample: { id: string; state: string; counters: Record<string, number | null> } }>;
+    }>("get_snapshot");
+    const cam1 = snap.srt.find((s) => s.sample.id === "mock-srt-cam1")!;
+    expect(cam1.sample.state).toBe("read");
+    const c = cam1.sample.counters;
+    // 送信側は有効、受信側は制御パケット分のみ
+    expect(c.packetsSentUnique).toBeGreaterThan(0);
+    expect(c.mbpsSendRate).toBeGreaterThan(1);
+    expect(c.mbpsReceiveRate).toBeLessThan(0.1);
+  });
+
   it("存在しない接続は null（欠測）を返し、他接続の値を混ぜない", async () => {
     const bridge = createMockBridge();
     await new Promise((r) => setTimeout(r, 30));

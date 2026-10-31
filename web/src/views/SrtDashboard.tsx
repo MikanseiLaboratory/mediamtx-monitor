@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "../store/useAppStore";
 import { SRT_METRICS, WINDOWS, SEVERITY } from "../lib/metrics";
 import { formatDuration, formatMbps, formatMs, formatNumber, formatPercent, srtStateLabel } from "../lib/format";
+import { useHeldTone } from "../lib/hold";
 import { EmptyState, SeverityBadge, Stat } from "../components/Badges";
 import { TimeSeries } from "../components/TimeSeries";
 import { EventTimeline } from "../components/EventTimeline";
@@ -21,6 +22,16 @@ const CHART_METRICS = [
   "srt_recv_mbps",
   "srt_rtt_ms",
 ] as const;
+
+/// 計測値が空のときの説明。メトリクスごとに「何が無いのか」を書き分ける。
+/// 以前は全グラフ共通で「まだ劣化や流量が記録されていません」と出しており、
+/// ドロップ率のグラフでも落ちた／落ちていないが分からなかった。
+const EMPTY_LABELS: Partial<Record<(typeof CHART_METRICS)[number], string>> = {
+  srt_drop_rate: "まだ計測が始まっていません（監視開始後に記録されます）",
+  srt_recovery_rate: "まだ計測が始まっていません（監視開始後に記録されます）",
+  srt_recv_mbps: "まだ受信レートが記録されていません",
+  srt_rtt_ms: "まだ RTT が記録されていません",
+};
 
 function worstSeverity(items: SrtConnSample[]): SrtSeverity | null {
   let worst: SrtSeverity | null = null;
@@ -56,6 +67,7 @@ export function SrtDashboard() {
   const series = useAppStore((s) => s.series);
   const loadSeries = useAppStore((s) => s.loadSeries);
   const appendPoints = useAppStore((s) => s.appendPoints);
+  const holdSecs = useAppStore((s) => s.config?.srt.holdSecs ?? 0);
   const [exportOpen, setExportOpen] = useState(false);
 
   const conns = useMemo(
@@ -99,6 +111,11 @@ export function SrtDashboard() {
     appendPoints(`srt:${activeId}`, at, values);
   }, [seq, activeId, lastUpdateAt, appendPoints]);
 
+  const worst = worstSeverity(conns);
+  // 一瞬の劣化を見逃さないよう、警告表示は最低 holdSecs 秒は保つ。
+  // フックは早期 return より前に置く（接続の増減でフック数が変わらないように）。
+  const shownWorst = useHeldTone(tone(worst), holdSecs * 1000);
+
   if (conns.length === 0) {
     return (
       <section className="view" data-testid="srt-dashboard">
@@ -114,8 +131,6 @@ export function SrtDashboard() {
       </section>
     );
   }
-
-  const worst = worstSeverity(conns);
 
   return (
     <section className="view" data-testid="srt-dashboard">
@@ -146,22 +161,28 @@ export function SrtDashboard() {
         <Stat
           label="最大ドロップ率"
           value={formatPercent(totals.srtMaxDropRate)}
-          tone={tone(worst)}
+          tone={shownWorst}
           hint="全接続中の最大値（区間）"
           testId="stat-max-drop"
         />
         <Stat
           label="最小回復率"
           value={formatPercent(totals.srtMinRecoveryRate, 1)}
-          tone={tone(worst)}
+          tone={shownWorst}
           hint="再送受信 / 損失検出 × 100"
           testId="stat-min-recovery"
         />
         <Stat
           label="総合状態"
           value={worst ? SEVERITY[worst].label : "—"}
-          tone={tone(worst)}
-          hint={worst === "ok" ? "劣化は検出されていません" : "接続カードの詳細を確認してください"}
+          tone={shownWorst}
+          hint={
+            shownWorst !== tone(worst)
+              ? "直前に警告がありました（表示を保持しています）"
+              : worst === "ok"
+                ? "劣化は検出されていません"
+                : "接続カードの詳細を確認してください"
+          }
           testId="stat-worst"
         />
       </div>
@@ -229,7 +250,16 @@ export function SrtDashboard() {
                 </h2>
                 <div className="srt-detail-facts">
                   <span>受信 <b>{formatMbps(active.derived.recvMbps)}</b></span>
-                  <span>回線容量 <b>{formatMbps(active.derived.linkCapacityMbps)}</b></span>
+                  {/* 回線容量は ACK で届く受信側の推定値。受信側（publish）では
+                      推定されないことがあり、そのときは 0 が入るので「—」にする。 */}
+                  <span>
+                    回線容量{" "}
+                    <b>
+                      {active.derived.linkCapacityMbps > 0
+                        ? formatMbps(active.derived.linkCapacityMbps)
+                        : "—"}
+                    </b>
+                  </span>
                   <span>帯域余裕 <b>{formatPercent(active.derived.headroomPercent, 0)}</b></span>
                   <span>推定遅延 <b>{formatMs(active.derived.estLatencyMs, 0)}</b></span>
                   <span>
@@ -253,7 +283,7 @@ export function SrtDashboard() {
                       emptyLabel={
                         state?.loading
                           ? "履歴を読み込み中…"
-                          : "まだ劣化や流量が記録されていません"
+                          : EMPTY_LABELS[key] ?? "計測値がまだありません"
                       }
                     />
                   );

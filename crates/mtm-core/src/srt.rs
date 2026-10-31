@@ -89,24 +89,45 @@ pub struct SrtDerived {
 impl SrtDerived {
     /// 差分から算出する。`prev` が `None`（初回）または `interval_ms <= 0` の
     /// ときは差分系を `None` にし、瞬間値だけを埋める。
-    pub fn compute(prev: Option<&SrtCounters>, cur: &SrtCounters, interval_ms: i64) -> Self {
+    ///
+    /// `state` は MediaMTX の接続状態（`publish` / `read` / `idle`）。
+    /// **この向きで数えるカウンタが変わる**点が重要:
+    ///
+    /// - `publish`（MediaMTX が受信する）… `packetsReceived*` と `mbpsReceiveRate`
+    /// - `read`（MediaMTX が送信する）… `packetsSent*` と `mbpsSendRate`
+    ///
+    /// MediaMTX の SRT 統計はソケットのカウンタをそのまま返すので、read 接続でも
+    /// `packetsReceived*` は「制御パケットの受信」しか数えない。そのまま使うと
+    /// 視聴側のドロップ率が常に 0 / null、受信レートが常に 0 になる。
+    pub fn compute(
+        prev: Option<&SrtCounters>,
+        cur: &SrtCounters,
+        interval_ms: i64,
+        state: &str,
+    ) -> Self {
+        let sending = is_sending_state(state);
         let mut d = Self {
             interval_ms,
-            recv_mbps: finite(cur.mbps_receive_rate),
+            // MediaMTX が送信側なら送信レートを見る（受信レートは制御パケット分しか出ない）。
+            recv_mbps: if sending {
+                finite(cur.mbps_send_rate)
+            } else {
+                finite(cur.mbps_receive_rate)
+            },
             link_capacity_mbps: finite(cur.mbps_link_capacity),
             rtt_ms: finite(cur.ms_rtt),
             est_latency_ms: finite(cur.ms_rtt) + 4.0 * finite(cur.us_packets_send_period) / 1000.0,
             ..Default::default()
         };
-        d.headroom_percent = if d.link_capacity_mbps > 0.0 {
-            Some(((d.link_capacity_mbps - d.recv_mbps) / d.link_capacity_mbps) * 100.0)
-        } else {
-            None
-        };
+        d.headroom_percent = headroom(d.link_capacity_mbps, d.recv_mbps);
 
         let Some(prev) = prev.filter(|_| interval_ms > 0) else {
             return d;
         };
+
+        if sending {
+            return d.compute_sender(prev, cur);
+        }
 
         let d_recv = delta(prev.packets_received, cur.packets_received);
         let d_unique = delta(prev.packets_received_unique, cur.packets_received_unique);
@@ -152,6 +173,57 @@ impl SrtDerived {
         d.unrecovered_rate = d.recovery_rate.map(|r| (100.0 - r).max(0.0));
         d.nak_rate = match (d_nak_sent.or(d_nak_received), d_recv.filter(|v| *v > 0.0)) {
             (Some(nak), Some(recv)) => Some(nak / recv * 100.0),
+            _ => None,
+        };
+        d
+    }
+
+    /// 送信側（MediaMTX が視聴者へ配信する `read` 接続）の差分計算。
+    ///
+    /// 送信側では次の対応になる。SRT の定義に沿って、同じ 3 つの指標を作る:
+    ///
+    /// | 指標 | 送信側の式 |
+    /// |---|---|
+    /// | ドロップ率 | Δ`packetsSendDrop` / Δ`packetsSent` × 100 |
+    /// | 回復率 | Δ`packetsRetrans` / Δ`packetsSendLoss` × 100 |
+    /// | NAK 率 | Δ`packetsReceivedNAK` / Δ`packetsSentUnique` × 100（送信側は NAK を受ける） |
+    fn compute_sender(&self, prev: &SrtCounters, cur: &SrtCounters) -> Self {
+        let mut d = self.clone();
+
+        let d_sent = delta(prev.packets_sent, cur.packets_sent);
+        let d_sent_unique = delta(prev.packets_sent_unique, cur.packets_sent_unique);
+        let d_send_drop = delta(prev.packets_send_drop, cur.packets_send_drop);
+        let d_send_loss = delta(prev.packets_send_loss, cur.packets_send_loss);
+        let d_retrans = delta(prev.packets_retrans, cur.packets_retrans);
+        let d_nak_received = delta(prev.packets_received_nak, cur.packets_received_nak);
+
+        if is_reset(d_sent)
+            || is_reset(d_sent_unique)
+            || is_reset(d_send_drop)
+            || is_reset(d_retrans)
+        {
+            d.counter_reset = true;
+            return d;
+        }
+
+        d.recv_packets = d_sent_unique.or(d_sent);
+        d.recovered_packets = d_retrans;
+        d.loss_packets = d_send_loss;
+        d.drop_packets = d_send_drop;
+
+        d.drop_rate = match (d_send_drop, d_sent.filter(|v| *v > 0.0)) {
+            (Some(drop), Some(sent)) => Some(drop / sent * 100.0),
+            _ => None,
+        };
+        d.recovery_rate = match (d_retrans, d_send_loss) {
+            (Some(retrans), Some(loss)) if loss > 0.0 => Some(retrans / loss * 100.0),
+            (Some(_), Some(0.0)) => Some(100.0),
+            (Some(_), None) => None,
+            _ => None,
+        };
+        d.unrecovered_rate = d.recovery_rate.map(|r| (100.0 - r).max(0.0));
+        d.nak_rate = match (d_nak_received, d_sent_unique.filter(|v| *v > 0.0)) {
+            (Some(nak), Some(sent)) => Some(nak / sent * 100.0),
             _ => None,
         };
         d
@@ -212,6 +284,49 @@ fn delta(prev: Option<u64>, cur: Option<u64>) -> Option<f64> {
 
 fn is_reset(d: Option<f64>) -> bool {
     d.is_some_and(|v| v < 0.0)
+}
+
+/// MediaMTX が「送信側」になる接続か。
+///
+/// MediaMTX の接続状態は `idle` / `read` / `publish`。
+/// `read` は「視聴者が MediaMTX から読む」＝ MediaMTX が送信する状態で、
+/// 送信側の統計（`packetsSent*`, `packetsRetrans`, `packetsSendDrop`, `mbpsSendRate`）
+/// に意味のある値が入る。
+///
+/// `publish` はその逆で、MediaMTX が受信側になる。
+pub fn is_sending_state(state: &str) -> bool {
+    state == "read"
+}
+
+/// 帯域余裕率 (%) = (回線容量 − レート) / 回線容量 × 100。
+///
+/// ## 回線容量は「推定値」であり、常に信頼できるとは限らない
+///
+/// `mbpsLinkCapacity` は SRT の **ACK パケットで受信側から送られてくる推定値**
+/// （Estimated Link Capacity）で、送信側のソケットに入る。
+///
+/// - 送信側（`read`）… 相手（視聴者）が推定した値が入る
+/// - 受信側（`publish`）… MediaMTX 自身は推定しないため、**0 やほぼ 0 に近い
+///   ごく小さな値**が入ることがある
+///
+/// そのため、そのまま割り算すると `-500%` のような物理的にありえない値になる。
+/// ここでは次のいずれかに当てはまる場合、推定値を信用せず `None`（算出不能）を返す:
+///
+/// - 容量が 0 以下
+/// - レートが容量を上回っている（推定が追いついていない／送信側の推定ではない）
+fn headroom(link_capacity_mbps: f64, rate_mbps: f64) -> Option<f64> {
+    if !link_capacity_mbps.is_finite() || !rate_mbps.is_finite() {
+        return None;
+    }
+    if link_capacity_mbps <= 0.0 {
+        return None;
+    }
+    // レートが容量を超えることは物理的にありえない（超えていれば容量の推定が無効）。
+    // わずかな計測誤差は許容するが、上回った時点で「容量が分からない」扱いにする。
+    if rate_mbps > link_capacity_mbps {
+        return None;
+    }
+    Some(((link_capacity_mbps - rate_mbps) / link_capacity_mbps) * 100.0)
 }
 
 impl SrtCounters {
@@ -306,7 +421,7 @@ mod tests {
     #[test]
     fn first_sample_has_no_deltas() {
         let cur = counters(1000, 900, 10, 5, 20);
-        let d = SrtDerived::compute(None, &cur, 2000);
+        let d = SrtDerived::compute(None, &cur, 2000, "publish");
         assert!(d.drop_rate.is_none());
         assert!(d.recovery_rate.is_none());
         assert!(d.recv_packets.is_none());
@@ -318,7 +433,7 @@ mod tests {
         let prev = counters(10_000, 9_900, 100, 50, 200);
         // Δrecv=1000, Δunique=1000, Δdrop=5, Δretrans=45, Δloss=50
         let cur = counters(11_000, 10_900, 105, 95, 250);
-        let d = SrtDerived::compute(Some(&prev), &cur, 2000);
+        let d = SrtDerived::compute(Some(&prev), &cur, 2000, "publish");
         assert_eq!(d.recv_packets, Some(1000.0));
         assert_eq!(d.drop_packets, Some(5.0));
         assert_eq!(d.recovered_packets, Some(45.0));
@@ -332,7 +447,7 @@ mod tests {
     fn loss_free_interval_reports_full_recovery() {
         let prev = counters(0, 0, 0, 0, 0);
         let cur = counters(100, 100, 0, 0, 0);
-        let d = SrtDerived::compute(Some(&prev), &cur, 1000);
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "publish");
         assert_eq!(d.recovery_rate, Some(100.0));
         assert_eq!(d.unrecovered_rate, Some(0.0));
         assert_eq!(d.drop_rate, Some(0.0));
@@ -342,7 +457,7 @@ mod tests {
     fn zero_received_interval_has_no_drop_rate() {
         let prev = counters(100, 100, 0, 0, 0);
         let cur = counters(100, 100, 0, 0, 0);
-        let d = SrtDerived::compute(Some(&prev), &cur, 1000);
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "publish");
         assert!(d.drop_rate.is_none());
         assert_eq!(d.drop_packets, Some(0.0));
     }
@@ -351,7 +466,7 @@ mod tests {
     fn counter_reset_is_flagged() {
         let prev = counters(10_000, 9_900, 100, 50, 200);
         let cur = counters(10, 10, 0, 0, 0);
-        let d = SrtDerived::compute(Some(&prev), &cur, 1000);
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "publish");
         assert!(d.counter_reset);
         assert!(d.drop_rate.is_none());
         assert!(d.recovery_rate.is_none());
@@ -361,7 +476,7 @@ mod tests {
     fn recovery_can_exceed_100_percent() {
         let prev = counters(0, 0, 0, 0, 0);
         let cur = counters(1000, 990, 10, 30, 20);
-        let d = SrtDerived::compute(Some(&prev), &cur, 1000);
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "publish");
         assert!(d.recovery_rate.unwrap() > 100.0);
         assert_eq!(d.unrecovered_rate, Some(0.0), "未回復率は 0 で下限");
     }
@@ -370,8 +485,88 @@ mod tests {
     fn zero_interval_is_treated_as_no_delta() {
         let prev = counters(0, 0, 0, 0, 0);
         let cur = counters(100, 100, 1, 1, 1);
-        let d = SrtDerived::compute(Some(&prev), &cur, 0);
+        let d = SrtDerived::compute(Some(&prev), &cur, 0, "publish");
         assert!(d.recv_packets.is_none());
+    }
+
+    // ---- 送信側（read 接続） ---- //
+
+    /// 送信側の累積カウンタ。受信系は 0（MediaMTX は送っていない側）にしておく。
+    fn sender_counters(
+        sent: u64,
+        sent_unique: u64,
+        send_drop: u64,
+        retrans: u64,
+        send_loss: u64,
+    ) -> SrtCounters {
+        SrtCounters {
+            packets_sent: Some(sent),
+            packets_sent_unique: Some(sent_unique),
+            packets_send_drop: Some(send_drop),
+            packets_retrans: Some(retrans),
+            packets_send_loss: Some(send_loss),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn read_connection_uses_sender_counters() {
+        // read（MediaMTX が送信）では packetsSent* から算出する
+        let prev = sender_counters(1000, 990, 0, 0, 0);
+        let mut cur = sender_counters(2000, 1980, 5, 20, 40);
+        cur.mbps_send_rate = 12.5;
+        cur.mbps_receive_rate = 0.02; // 制御パケット分だけ
+
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "read");
+        assert_eq!(d.recv_packets, Some(990.0), "送信ユニーク数の差分");
+        assert_eq!(d.drop_packets, Some(5.0));
+        assert_eq!(d.recovered_packets, Some(20.0));
+        assert_eq!(d.loss_packets, Some(40.0));
+        // 5 / 1000 × 100 = 0.5%
+        assert!(
+            (d.drop_rate.unwrap() - 0.5).abs() < 1e-9,
+            "{:?}",
+            d.drop_rate
+        );
+        // 20 / 40 × 100 = 50%
+        assert!((d.recovery_rate.unwrap() - 50.0).abs() < 1e-9);
+        // 受信レートは送信レートを使う（0.02 ではなく 12.5）
+        assert!((d.recv_mbps - 12.5).abs() < 1e-9);
+        assert!(!d.counter_reset);
+    }
+
+    #[test]
+    fn read_connection_with_zero_sent_has_no_rate() {
+        // 送信が 0 の区間（視聴が止まっている等）は率を出さない（0 と混同しない）
+        let prev = sender_counters(1000, 990, 0, 0, 0);
+        let cur = sender_counters(1000, 990, 0, 0, 0);
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "read");
+        assert!(
+            d.drop_rate.is_none(),
+            "送信 0 でドロップ率を出してはいけない"
+        );
+        assert_eq!(d.recovery_rate, Some(100.0), "損失 0 は回復率 100");
+    }
+
+    #[test]
+    fn publish_connection_ignores_sender_counters() {
+        // publish（MediaMTX が受信）では受信系を使う。送信系が 0 でも影響しない。
+        let prev = counters(1000, 990, 0, 0, 0);
+        let mut cur = counters(2000, 1980, 10, 30, 60);
+        cur.mbps_send_rate = 0.0;
+        cur.mbps_receive_rate = 9.0;
+
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "publish");
+        assert_eq!(d.recv_packets, Some(990.0));
+        assert!((d.drop_rate.unwrap() - 10.0 / 1000.0 * 100.0).abs() < 1e-9);
+        assert!((d.recv_mbps - 9.0).abs() < 1e-9, "受信レートを使う");
+    }
+
+    #[test]
+    fn is_sending_state_only_read() {
+        assert!(is_sending_state("read"));
+        assert!(!is_sending_state("publish"));
+        assert!(!is_sending_state("idle"));
     }
 
     #[test]
@@ -422,8 +617,59 @@ mod tests {
         let c = SrtCounters::from_json(&v);
         assert_eq!(c.packets_received_unique, Some(5000));
         assert_eq!(c.ms_rtt, 9.5);
-        let d = SrtDerived::compute(None, &c, 1000);
+        let d = SrtDerived::compute(None, &c, 1000, "publish");
         assert_eq!(d.est_latency_ms, 9.5 + 4.0);
         assert_eq!(d.headroom_percent, Some((50.0 - 12.25) / 50.0 * 100.0));
+    }
+
+    // ---- 帯域余裕 ---- //
+
+    /// `mbpsLinkCapacity` は ACK で送られてくる受信側の推定値。
+    /// 受信側（publish）では自分では推定しないので、0 や極端に小さい値が入る。
+    /// そのまま割り算すると -500% のようなありえない数字になる。
+    #[test]
+    fn headroom_is_none_when_capacity_is_zero() {
+        assert_eq!(headroom(0.0, 12.0), None);
+    }
+
+    #[test]
+    fn headroom_is_none_when_rate_exceeds_capacity() {
+        // 容量 2.1 Mbps なのにレートが 12 Mbps → 推定が追いついていない
+        assert_eq!(headroom(2.1, 12.0), None);
+        // わずかでも超えたら算出しない（-500% を出さない）
+        assert_eq!(headroom(11.9, 12.0), None);
+    }
+
+    #[test]
+    fn headroom_is_computed_for_plausible_values() {
+        let h = headroom(40.0, 12.0).unwrap();
+        assert!((h - 70.0).abs() < 1e-9);
+        // 容量ちょうどまで使い切っている場合は 0%
+        assert_eq!(headroom(12.0, 12.0), Some(0.0));
+        // 余裕が大きい場合も 100% を超えない
+        assert_eq!(headroom(100.0, 1.0), Some(99.0));
+    }
+
+    #[test]
+    fn headroom_ignores_non_finite() {
+        assert_eq!(headroom(f64::NAN, 1.0), None);
+        assert_eq!(headroom(10.0, f64::INFINITY), None);
+    }
+
+    /// publish 接続で容量が推定できていない場合でも、表示が壊れないこと。
+    #[test]
+    fn publish_with_unestimated_capacity_has_no_headroom() {
+        let prev = counters(0, 0, 0, 0, 0);
+        let mut cur = counters(1000, 990, 5, 10, 20);
+        cur.mbps_receive_rate = 12.0;
+        // 受信側では推定値が入らない（0 やごく小さい値）
+        cur.mbps_link_capacity = 2.1;
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "publish");
+        assert_eq!(
+            d.headroom_percent, None,
+            "容量が推定できていなければ余裕率は出さない"
+        );
+        // レート自体は出る
+        assert!((d.recv_mbps - 12.0).abs() < 1e-9);
     }
 }

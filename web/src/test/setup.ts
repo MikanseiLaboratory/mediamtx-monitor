@@ -26,6 +26,8 @@ if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
 }
 
 // HTMLCanvasElement#getContext / toDataURL は jsdom では未実装。
+// jsdom には canvas / Path2D が無く uPlot の描画が動かないため、描画を伴う
+// コンポーネントはテスト側で差し替える（`srtDashboard.test.tsx` を参照）。
 if (typeof HTMLCanvasElement !== "undefined") {
   HTMLCanvasElement.prototype.getContext = (() =>
     null) as unknown as typeof HTMLCanvasElement.prototype.getContext;

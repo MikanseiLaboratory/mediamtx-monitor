@@ -177,6 +177,13 @@ pub struct SrtThresholds {
     pub rtt_ms_warn: f64,
     /// 警告の再発火を抑えるクールダウン（秒）。
     pub cooldown_secs: u64,
+    /// 劣化／回復を確定するまでの保持時間（秒）。
+    ///
+    /// 1 周期だけ黄色になったような瞬時の変化をそのままイベントにすると、
+    /// 「劣化」と「回復」が交互に並んでノイズになる。この秒数だけ状態が
+    /// 続いてから、劣化・回復を確定して記録する（0 で従来どおり即時）。
+    /// 記録する時刻は、状態が最初に変わった時点まで遡る。
+    pub hold_secs: u64,
 }
 
 impl Default for SrtThresholds {
@@ -187,6 +194,7 @@ impl Default for SrtThresholds {
             recovery_rate_warn: 90.0,
             rtt_ms_warn: 200.0,
             cooldown_secs: 300,
+            hold_secs: 3,
         }
     }
 }
@@ -262,6 +270,8 @@ impl AppConfig {
         self.srt.recovery_rate_warn = self.srt.recovery_rate_warn.clamp(0.0, 100.0);
         self.srt.rtt_ms_warn = self.srt.rtt_ms_warn.clamp(1.0, 60_000.0);
         self.srt.cooldown_secs = self.srt.cooldown_secs.clamp(0, 86_400);
+        // 保持は 1 分まで（それ以上は「劣化」と呼べない長さになる）。
+        self.srt.hold_secs = self.srt.hold_secs.clamp(0, 60);
         self.endpoint.base_url = self.endpoint.base_url.trim().to_string();
         self
     }
