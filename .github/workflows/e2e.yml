@@ -133,13 +133,25 @@ jobs:
         with:
           key: e2e
 
-      - name: 実機結合テスト（MediaMTX + SRT）
+      - name: フロントエンドのビルド（Tauri の生成コンテキストに必要）
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 依存インストールとビルド
+        working-directory: web
         run: |
-          mkdir -p web/dist
-          if [ ! -f web/dist/index.html ]; then
-            echo '<!doctype html><title>placeholder</title>' > web/dist/index.html
-          fi
-          cargo test -p mediamtx-monitor --test live_mediamtx -- --nocapture --test-threads=1
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: 実機結合テスト（MediaMTX + SRT）
+        run: cargo test -p mediamtx-monitor --test live_mediamtx -- --nocapture --test-threads=1
 
       - name: ストリームを流したまま再テスト（ドロップ/回復率が非 null になること）
         run: |

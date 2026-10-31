@@ -38,12 +38,23 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev libssl-dev pkg-config build-essential
-          # Tauri の生成コンテキストは web/dist を要求するため、先に空を作る
-          # （実際のフロントは js ジョブでビルドする）。
-          mkdir -p web/dist
-          if [ ! -f web/dist/index.html ]; then
-            echo '<!doctype html><title>placeholder</title>' > web/dist/index.html
-          fi
+
+      - name: フロントエンドのビルド（Rust ジョブにも必要）
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 依存インストールとビルド
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Rust ツールチェーン
         uses: dtolnay/rust-toolchain@stable
