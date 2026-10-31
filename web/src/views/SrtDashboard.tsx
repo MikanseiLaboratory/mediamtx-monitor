@@ -250,7 +250,16 @@ export function SrtDashboard() {
                 </h2>
                 <div className="srt-detail-facts">
                   <span>受信 <b>{formatMbps(active.derived.recvMbps)}</b></span>
-                  <span>回線容量 <b>{formatMbps(active.derived.linkCapacityMbps)}</b></span>
+                  {/* 回線容量は ACK で届く受信側の推定値。受信側（publish）では
+                      推定されないことがあり、そのときは 0 が入るので「—」にする。 */}
+                  <span>
+                    回線容量{" "}
+                    <b>
+                      {active.derived.linkCapacityMbps > 0
+                        ? formatMbps(active.derived.linkCapacityMbps)
+                        : "—"}
+                    </b>
+                  </span>
                   <span>帯域余裕 <b>{formatPercent(active.derived.headroomPercent, 0)}</b></span>
                   <span>推定遅延 <b>{formatMs(active.derived.estLatencyMs, 0)}</b></span>
                   <span>

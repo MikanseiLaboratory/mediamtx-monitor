@@ -119,11 +119,7 @@ impl SrtDerived {
             est_latency_ms: finite(cur.ms_rtt) + 4.0 * finite(cur.us_packets_send_period) / 1000.0,
             ..Default::default()
         };
-        d.headroom_percent = if d.link_capacity_mbps > 0.0 {
-            Some(((d.link_capacity_mbps - d.recv_mbps) / d.link_capacity_mbps) * 100.0)
-        } else {
-            None
-        };
+        d.headroom_percent = headroom(d.link_capacity_mbps, d.recv_mbps);
 
         let Some(prev) = prev.filter(|_| interval_ms > 0) else {
             return d;
@@ -300,6 +296,37 @@ fn is_reset(d: Option<f64>) -> bool {
 /// `publish` はその逆で、MediaMTX が受信側になる。
 pub fn is_sending_state(state: &str) -> bool {
     state == "read"
+}
+
+/// 帯域余裕率 (%) = (回線容量 − レート) / 回線容量 × 100。
+///
+/// ## 回線容量は「推定値」であり、常に信頼できるとは限らない
+///
+/// `mbpsLinkCapacity` は SRT の **ACK パケットで受信側から送られてくる推定値**
+/// （Estimated Link Capacity）で、送信側のソケットに入る。
+///
+/// - 送信側（`read`）… 相手（視聴者）が推定した値が入る
+/// - 受信側（`publish`）… MediaMTX 自身は推定しないため、**0 やほぼ 0 に近い
+///   ごく小さな値**が入ることがある
+///
+/// そのため、そのまま割り算すると `-500%` のような物理的にありえない値になる。
+/// ここでは次のいずれかに当てはまる場合、推定値を信用せず `None`（算出不能）を返す:
+///
+/// - 容量が 0 以下
+/// - レートが容量を上回っている（推定が追いついていない／送信側の推定ではない）
+fn headroom(link_capacity_mbps: f64, rate_mbps: f64) -> Option<f64> {
+    if !link_capacity_mbps.is_finite() || !rate_mbps.is_finite() {
+        return None;
+    }
+    if link_capacity_mbps <= 0.0 {
+        return None;
+    }
+    // レートが容量を超えることは物理的にありえない（超えていれば容量の推定が無効）。
+    // わずかな計測誤差は許容するが、上回った時点で「容量が分からない」扱いにする。
+    if rate_mbps > link_capacity_mbps {
+        return None;
+    }
+    Some(((link_capacity_mbps - rate_mbps) / link_capacity_mbps) * 100.0)
 }
 
 impl SrtCounters {
@@ -593,5 +620,56 @@ mod tests {
         let d = SrtDerived::compute(None, &c, 1000, "publish");
         assert_eq!(d.est_latency_ms, 9.5 + 4.0);
         assert_eq!(d.headroom_percent, Some((50.0 - 12.25) / 50.0 * 100.0));
+    }
+
+    // ---- 帯域余裕 ---- //
+
+    /// `mbpsLinkCapacity` は ACK で送られてくる受信側の推定値。
+    /// 受信側（publish）では自分では推定しないので、0 や極端に小さい値が入る。
+    /// そのまま割り算すると -500% のようなありえない数字になる。
+    #[test]
+    fn headroom_is_none_when_capacity_is_zero() {
+        assert_eq!(headroom(0.0, 12.0), None);
+    }
+
+    #[test]
+    fn headroom_is_none_when_rate_exceeds_capacity() {
+        // 容量 2.1 Mbps なのにレートが 12 Mbps → 推定が追いついていない
+        assert_eq!(headroom(2.1, 12.0), None);
+        // わずかでも超えたら算出しない（-500% を出さない）
+        assert_eq!(headroom(11.9, 12.0), None);
+    }
+
+    #[test]
+    fn headroom_is_computed_for_plausible_values() {
+        let h = headroom(40.0, 12.0).unwrap();
+        assert!((h - 70.0).abs() < 1e-9);
+        // 容量ちょうどまで使い切っている場合は 0%
+        assert_eq!(headroom(12.0, 12.0), Some(0.0));
+        // 余裕が大きい場合も 100% を超えない
+        assert_eq!(headroom(100.0, 1.0), Some(99.0));
+    }
+
+    #[test]
+    fn headroom_ignores_non_finite() {
+        assert_eq!(headroom(f64::NAN, 1.0), None);
+        assert_eq!(headroom(10.0, f64::INFINITY), None);
+    }
+
+    /// publish 接続で容量が推定できていない場合でも、表示が壊れないこと。
+    #[test]
+    fn publish_with_unestimated_capacity_has_no_headroom() {
+        let prev = counters(0, 0, 0, 0, 0);
+        let mut cur = counters(1000, 990, 5, 10, 20);
+        cur.mbps_receive_rate = 12.0;
+        // 受信側では推定値が入らない（0 やごく小さい値）
+        cur.mbps_link_capacity = 2.1;
+        let d = SrtDerived::compute(Some(&prev), &cur, 1000, "publish");
+        assert_eq!(
+            d.headroom_percent, None,
+            "容量が推定できていなければ余裕率は出さない"
+        );
+        // レート自体は出る
+        assert!((d.recv_mbps - 12.0).abs() < 1e-9);
     }
 }

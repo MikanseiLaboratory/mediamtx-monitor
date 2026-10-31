@@ -186,7 +186,11 @@ export function createMockBridge(): Bridge {
             // 送信側は `mbpsSendRate` を見る（`mbpsReceiveRate` は制御パケット分のみ）。
             mbpsReceiveRate: sending ? 0.02 : recvMbps,
             mbpsSendRate: sending ? recvMbps : 0,
-            mbpsLinkCapacity: 40,
+            // 回線容量は SRT の ACK で送られてくる受信側の推定値。
+            // 受信側（publish）では自分では推定しないので、実機では 0 や
+            // ごく小さい値になる。ここでも同じ挙動にして、帯域余裕が
+            // 算出されない（— になる）ことを画面で確認できるようにする。
+            mbpsLinkCapacity: sending ? 40 : 0,
             usPacketsSendPeriod: 1000,
             msReceiveBuf: 120,
             msSendBuf: null,
@@ -207,8 +211,9 @@ export function createMockBridge(): Bridge {
             unrecoveredRate: 100 - recoveryRate,
             nakRate: dropRate * 1.2,
             recvMbps,
-            linkCapacityMbps: 40,
-            headroomPercent: ((40 - recvMbps) / 40) * 100,
+            // 回線容量と帯域余裕は、送信側（ACK を受け取る側）でだけ分かる。
+            linkCapacityMbps: sending ? 40 : 0,
+            headroomPercent: sending ? ((40 - recvMbps) / 40) * 100 : null,
             rttMs: 8 + Math.sin(at / 11000 + i) * 3,
             estLatencyMs: 12,
             counterReset: false,
