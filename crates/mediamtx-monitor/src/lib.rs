@@ -114,45 +114,6 @@ pub fn run(smoke_exit_after_ms: Option<u64>) -> tauri::Result<()> {
                 notify: notify_for_setup.clone(),
             });
 
-            // ウィンドウは設定ファイルからの自動生成ではなく、ここで明示的に作る。
-            // 失敗しても理由を残して起動を続ける（画面が出ない原因を追えるように）。
-            if let Some(cfg) = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|w| w.label == "main")
-                .cloned()
-            {
-                let mut cfg = cfg;
-                // 画面外に開かないよう、プライマリモニタの中央に置く。
-                if let Ok(Some(monitor)) = handle.primary_monitor() {
-                    let scale = monitor.scale_factor();
-                    let size = monitor.size().to_logical::<f64>(scale);
-                    let (w, h) = (cfg.width, cfg.height);
-                    if size.width > w && size.height > h {
-                        cfg.x = Some(((size.width - w) / 2.0).floor());
-                        cfg.y = Some(((size.height - h) / 2.0).floor());
-                    }
-                }
-                match tauri::WebviewWindowBuilder::from_config(&handle, &cfg) {
-                    Ok(builder) => match builder.build() {
-                        Ok(window) => {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                        Err(err) => {
-                            eprintln!("メインウィンドウを作成できませんでした: {err}");
-                            log::error!("メインウィンドウを作成できませんでした: {err}");
-                        }
-                    },
-                    Err(err) => {
-                        eprintln!("ウィンドウ設定が不正です: {err}");
-                        log::error!("ウィンドウ設定が不正です: {err}");
-                    }
-                }
-            }
-
             if let Some(tray) = tray::install(app, engine.clone()) {
                 tray::spawn_tooltip_updater(tray, engine.clone());
             }
@@ -191,7 +152,6 @@ pub fn run(smoke_exit_after_ms: Option<u64>) -> tauri::Result<()> {
             commands::stop_monitor,
             commands::get_monitor_status,
             commands::get_snapshot,
-            commands::get_update,
             commands::get_series,
             commands::get_events,
             commands::list_paths,

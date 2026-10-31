@@ -16,16 +16,11 @@
         "title": "MediaMTX Monitor",
         "width": 1400,
         "height": 900,
-        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0 MediaMTX Monitor/0.1.0",
-        "minWidth": 960,
-        "minHeight": 600,
-        "resizable": true,
-        "create": false,
-        "visible": true
+        "resizable": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
