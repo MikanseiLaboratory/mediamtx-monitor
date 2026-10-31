@@ -144,9 +144,10 @@ export function createMockBridge(): Bridge {
     const at = atMs ?? Date.now();
     const srt: SrtConnPatch[] = conns.map((c, i) => {
       const jitter = (rand() - 0.5) * 0.004;
-      // 約 45 秒周期で「数秒だけ劣化する」区間を作る。保持時間の挙動を
-      // 画面で確認できるよう、短い劣化が確実に起きるようにしている。
-      const burst = i === 0 && Math.sin(at / 7000) > 0.7 ? 1.2 : 0;
+      // 約 20 秒周期で「しばらく劣化し続ける」区間を作る。保持時間の挙動を
+      // 画面で確認できるよう、警告域が確実に数秒以上続くようにしている
+      // （保持時間より短いと、劣化として記録されない）。
+      const burst = i === 0 && Math.sin(at / 3000) > 0.55 ? 2.0 : 0;
       const dropRate = Math.max(
         0,
         Math.min(5, 0.35 + jitter + (i === 0 ? Math.sin(at / 20000) * 0.4 : -0.3) + burst),
