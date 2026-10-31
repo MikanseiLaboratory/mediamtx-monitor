@@ -113,6 +113,8 @@ const emptyTotals: ServerTotals = {
 
 let toastSeq = 1;
 let unsubscribe: Array<() => void> = [];
+/// スコープごとの取得世代。古い応答を捨てるために使う（状態には持たない）。
+const loadGeneration = new Map<string, number>();
 
 export const useAppStore = create<AppStore>((set, get) => ({
   connected: false,
@@ -214,6 +216,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   /**
    * 1 スコープ分の系列を取得する。`force` で窓をいっぱい取り直す。
    * 以後の更新は `appendPoints` で末尾に足していく（毎秒の再取得を避ける）。
+   *
+   * **応答の順序**: 窓や接続を素早く切り替えると、古い要求の応答が新しい要求より
+   * 後から届くことがある。そのまま書くと古い期間のデータが新しい窓に混ざるので、
+   * スコープごとに世代番号を持ち、**最新の要求の応答だけ**を採用する。
    */
   async loadSeries(scope, metrics, force = false) {
     const to = Date.now();
@@ -221,6 +227,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const cached = get().series[scope];
     const lastAt = cached?.byMetric[metrics[0]]?.at(-1)?.[0] ?? 0;
     if (!force && cached && !cached.loading && lastAt >= to - 10_000) return;
+
+    // この要求の世代を確定させ、以降これより古い応答は捨てる。
+    const generation = (loadGeneration.get(scope) ?? 0) + 1;
+    loadGeneration.set(scope, generation);
+    const isCurrent = () => loadGeneration.get(scope) === generation;
+
     set({
       series: {
         ...get().series,
@@ -229,6 +241,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     });
     try {
       const resp = await api.getSeries({ scope, metrics, fromMs: from, toMs: to });
+      if (!isCurrent()) return;
       const byMetric: Record<string, MetricPoint[]> = {};
       for (const [metric, points] of resp.series) byMetric[metric] = points;
       set({
@@ -238,6 +251,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         },
       });
     } catch (err) {
+      // 古い要求の失敗で、新しい要求の結果や読み込み中表示を壊さない。
+      if (!isCurrent()) return;
       set({
         series: {
           ...get().series,
@@ -250,6 +265,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   appendPoints(scope, atMs, values) {
     const cached = get().series[scope];
     if (!cached) return;
+    // 取得中に追記すると、後から届く取得結果（追記より前の時点までのデータ）に
+    // 上書きされ、追記分が消える。取得が終わるまでは追記を控える。
+    if (cached.loading) return;
     const cutoff = atMs - get().windowMs - 60_000;
     const byMetric: Record<string, MetricPoint[]> = { ...cached.byMetric };
     for (const [metric, value] of Object.entries(values)) {
@@ -316,6 +334,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 export function resetStoreForTest(): void {
   unsubscribe.forEach((u) => u());
   unsubscribe = [];
+  loadGeneration.clear();
   useAppStore.setState({
     connected: false,
     status: null,
