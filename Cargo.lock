@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "mediamtx-monitor"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "chrono",
  "log",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "mtm-core"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "chrono",
  "log",
