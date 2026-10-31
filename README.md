@@ -11,6 +11,19 @@ MediaMTX の **死活監視** と **SRT 回線の品質（パケットドロッ�
 > このアプリは MediaMTX を **外から観測するだけ** です。MediaMTX 本体の設定変更や再起動は
 > 行いません（API 経由の操作は、ユーザーが明示的に実行したときだけ送ります）。
 
+## ダウンロード
+
+[Releases](https://github.com/MikanseiLaboratory/mediamtx-monitor/releases) から取得できます。
+
+| ファイル | 対象 |
+|---|---|
+| `MediaMTX.Monitor_*_x64-setup.exe` | Windows（インストーラ） |
+| `MediaMTX.Monitor_*_amd64.deb` | Debian / Ubuntu |
+
+> **v0.1.0-alpha.1 はプレリリースです。** 署名をしていないため、初回起動時に
+> Windows SmartScreen の警告（「Windows によって PC が保護されました」）が出ます。
+> 「詳細情報」→「実行」で進めてください。
+
 ## 構成
 
 ```
@@ -143,7 +156,13 @@ cargo test -p mediamtx-monitor --test live_mediamtx -- --nocapture --test-thread
 - `.github/workflows/e2e.yml`: **GitHub ホステッドの Ubuntu 実機**で本物の MediaMTX と
   ffmpeg を動かし、SRT のドロップ率・回復率が算出されること、パス操作とエクスポートを検証
   （毎日 + 手動実行）。ログと書き出しファイルをアーティファクトに保存します。
-- `.github/workflows/release.yml`: タグ push でインストーラをドラフトリリースへ。
+- `.github/workflows/release.yml`: **Tauri 公式の [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action)**
+  でビルドとリリース作成を行います。`v*` タグの push で起動し、タグ名に `-`（`v0.1.0-alpha.1` など）が
+  含まれる場合は自動でプレリリースになります。手動実行（`workflow_dispatch`）ではタグ・
+  プレリリース・ドラフトを指定できます。
+
+  > WiX（msi）はプレリリース識別子を扱えないため、Windows は NSIS のセットアップ exe のみを
+  > 生成します（`tauri.conf.json` の `bundle.targets` も `nsis` と `deb` のみ）。
 
 ## 制限事項
 
