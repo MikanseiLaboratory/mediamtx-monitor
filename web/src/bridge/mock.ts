@@ -153,6 +153,10 @@ export function createMockBridge(): Bridge {
       );
       const recoveryRate = Math.max(80, Math.min(100, 95 + Math.sin(at / 15000 + i) * 4));
       const recvMbps = baseRecvMbps[i] + Math.sin(at / 7000 + i) * 0.6;
+      // `read` は MediaMTX が視聴者へ送る側なので、送信系のカウンタが有効。
+      // `publish` はその逆で、受信系が有効。実機の MediaMTX と同じ形にする。
+      const sending = c.state === "read";
+      const sentTotal = c.counters.receivedUnique;
       return {
         seq,
         sample: {
@@ -169,16 +173,18 @@ export function createMockBridge(): Bridge {
             packetsReceivedLoss: c.counters.loss,
             packetsReceivedBelated: c.counters.belated,
             packetsReceivedUndecrypt: c.counters.undecrypt,
-            packetsSent: 0,
-            packetsSentUnique: 0,
-            packetsRetrans: 0,
-            packetsSendDrop: 0,
-            packetsSendLoss: 0,
-            packetsSentNak: c.counters.sentNak,
-            packetsReceivedNak: 0,
+            // 送信側（read 接続）の累積値。受信側と同じ規模で進む。
+            packetsSent: sending ? sentTotal : 0,
+            packetsSentUnique: sending ? sentTotal : 0,
+            packetsRetrans: sending ? c.counters.retrans : 0,
+            packetsSendDrop: sending ? c.counters.drop : 0,
+            packetsSendLoss: sending ? c.counters.loss : 0,
+            packetsSentNak: sending ? 0 : c.counters.sentNak,
+            packetsReceivedNak: sending ? c.counters.sentNak : 0,
             msRtt: 8 + Math.sin(at / 11000 + i) * 3,
-            mbpsReceiveRate: recvMbps,
-            mbpsSendRate: 0,
+            // 送信側は `mbpsSendRate` を見る（`mbpsReceiveRate` は制御パケット分のみ）。
+            mbpsReceiveRate: sending ? 0.02 : recvMbps,
+            mbpsSendRate: sending ? recvMbps : 0,
             mbpsLinkCapacity: 40,
             usPacketsSendPeriod: 1000,
             msReceiveBuf: 120,

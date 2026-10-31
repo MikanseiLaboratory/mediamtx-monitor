@@ -332,8 +332,12 @@ impl FrameBuilder {
                 seen.insert(c.id.clone());
                 // 差分は前回の累積値から。`derived` は呼び出し前に計算済みだが、
                 // ここでは間隔を確実に揃えるために再計算する。
-                let derived =
-                    SrtDerived::compute(self.prev_srt.get(&c.id), &c.counters, interval_ms);
+                let derived = SrtDerived::compute(
+                    self.prev_srt.get(&c.id),
+                    &c.counters,
+                    interval_ms,
+                    &c.state,
+                );
                 self.prev_srt.insert(c.id.clone(), c.counters.clone());
 
                 let severity = derived.severity(&self.config.srt);
@@ -609,11 +613,16 @@ mod tests {
     }
 
     fn obs_srt(id: &str, path: &str, counters: SrtCounters) -> ObservedSrt {
+        // 既定は publish（MediaMTX が受信側）。受信系カウンタを使うテストの前提。
+        obs_srt_state(id, path, counters, "publish")
+    }
+
+    fn obs_srt_state(id: &str, path: &str, counters: SrtCounters, state: &str) -> ObservedSrt {
         ObservedSrt {
             id: id.into(),
             path: path.into(),
             remote_addr: "127.0.0.1:1".into(),
-            state: "read".into(),
+            state: state.into(),
             created: None,
             counters: counters.clone(),
             derived: SrtDerived::default(),
@@ -775,6 +784,129 @@ mod tests {
         assert!((d.recovery_rate.unwrap() - 80.0).abs() < 1e-9);
         assert_eq!(u.totals.srt_max_drop_rate, d.drop_rate);
         assert_eq!(u.totals.srt_min_recovery_rate, d.recovery_rate);
+    }
+
+    /// read 接続（MediaMTX が視聴者へ送信する）では、送信側カウンタから
+    /// ドロップ率とレートを作ること。
+    ///
+    /// MediaMTX の SRT 統計はソケットのカウンタなので、read でも
+    /// `packetsReceived*` は制御パケットしか数えない。受信側だけで計算すると、
+    /// 視聴側のドロップ率が常に 0 / null、受信レートが常に 0 になる。
+    #[test]
+    fn read_connection_uses_sent_counters() {
+        let cfg = AppConfig::default();
+        let mut fb = FrameBuilder::new(&cfg);
+        let mut c1 = SrtCounters {
+            packets_sent: Some(100_000),
+            packets_sent_unique: Some(99_000),
+            // 送信側カウンタは 0 始まりで揃える（`None` だと差分が取れない）
+            packets_send_drop: Some(0),
+            packets_retrans: Some(0),
+            packets_send_loss: Some(0),
+            packets_received_nak: Some(0),
+            mbps_send_rate: 12.0,
+            ..Default::default()
+        };
+        c1.mbps_receive_rate = 0.02; // 制御パケット分
+        fb.ingest(
+            at(0),
+            health_ok(),
+            None,
+            Some(vec![]),
+            Some(vec![obs_srt_state("r1", "cam1", c1.clone(), "read")]),
+            true,
+        );
+
+        let mut c2 = c1.clone();
+        c2.packets_sent = Some(101_000);
+        c2.packets_sent_unique = Some(100_000);
+        c2.packets_send_drop = Some(10);
+        c2.packets_retrans = Some(40);
+        c2.packets_send_loss = Some(50);
+        c2.mbps_send_rate = 12.5;
+        let u = fb.ingest(
+            at(2),
+            health_ok(),
+            None,
+            Some(vec![]),
+            Some(vec![obs_srt_state("r1", "cam1", c2, "read")]),
+            false,
+        );
+        let d = &u.srt[0].sample.derived;
+        assert_eq!(d.recv_packets, Some(1000.0), "送信ユニーク数の差分");
+        // 10 / 1000 × 100 = 1.0%
+        assert!(
+            (d.drop_rate.unwrap() - 1.0).abs() < 1e-9,
+            "read のドロップ率が算出されていない: {:?}",
+            d.drop_rate
+        );
+        // 40 / 50 × 100 = 80%
+        assert!((d.recovery_rate.unwrap() - 80.0).abs() < 1e-9);
+        // 受信レートは送信レート（12.5）を使う
+        assert!(
+            (d.recv_mbps - 12.5).abs() < 1e-9,
+            "read のレートが送信レートになっていない: {}",
+            d.recv_mbps
+        );
+        // 合計にも反映される
+        assert_eq!(u.totals.srt_max_drop_rate, d.drop_rate);
+        // 系列にも送信レートが載る
+        let series = fb.srt_series("r1").expect("SRT 系列");
+        assert!(
+            (series
+                .get(super::metric_key::SRT_RECV_MBPS)
+                .and_then(|r| r.last())
+                .and_then(|p| p.value)
+                .unwrap()
+                - 12.5)
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
+    fn publish_connection_still_uses_received_counters() {
+        // read 対応を入れても publish 側の計算が変わらないこと
+        let cfg = AppConfig::default();
+        let mut fb = FrameBuilder::new(&cfg);
+        let first = SrtCounters {
+            packets_received: Some(1000),
+            packets_received_unique: Some(990),
+            packets_received_nak: Some(0),
+            packets_sent_nak: Some(0),
+            packets_received_drop: Some(0),
+            packets_received_retrans: Some(0),
+            packets_received_loss: Some(0),
+            mbps_receive_rate: 8.0,
+            ..Default::default()
+        };
+        fb.ingest(
+            at(0),
+            health_ok(),
+            None,
+            Some(vec![]),
+            Some(vec![obs_srt_state("p1", "cam2", first.clone(), "publish")]),
+            true,
+        );
+        let mut second = first.clone();
+        second.packets_received = Some(2000);
+        second.packets_received_unique = Some(1980);
+        second.packets_received_drop = Some(20);
+        second.packets_received_retrans = Some(30);
+        second.packets_received_loss = Some(60);
+        let u = fb.ingest(
+            at(2),
+            health_ok(),
+            None,
+            Some(vec![]),
+            Some(vec![obs_srt_state("p1", "cam2", second, "publish")]),
+            false,
+        );
+        let d = &u.srt[0].sample.derived;
+        assert_eq!(d.recv_packets, Some(990.0));
+        assert!((d.drop_rate.unwrap() - 2.0).abs() < 1e-9);
+        assert!((d.recovery_rate.unwrap() - 50.0).abs() < 1e-9);
+        assert!((d.recv_mbps - 8.0).abs() < 1e-9);
     }
 
     #[test]
