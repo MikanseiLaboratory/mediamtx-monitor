@@ -11,14 +11,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 作成するタグ（例: v0.1.0-alpha.1）
+        description: "作成するタグ（例: v0.1.0-alpha.1）"
         required: true
       prerelease:
-        description: プレリリースとして公開する
+        description: "プレリリースとして公開する"
         type: boolean
         default: true
       draft:
-        description: ドラフトとして作成する
+        description: "ドラフトとして作成する"
         type: boolean
         default: false
 
